@@ -1,0 +1,294 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Setup for CrumbCommander Application
+
+Parameters:
+  VpcCidrBlock:
+    Description: CIDR block for the VPC
+    Type: String
+    Default: "10.0.0.0/16"
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidrBlock
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: "10.0.1.0/24"
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: "public1"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: "10.0.2.0/24"
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: "public2"
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: "10.0.3.0/24"
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: "private1"
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: "10.0.4.0/24"
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: "private2"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  DevRouteAssos:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  MySQLDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: "crumbcommanderdb"
+      DBInstanceIdentifier: "crumbcommanderdb"
+      Engine: "mysql"
+      EngineVersion: "8.0"
+      DBInstanceClass: "db.t3.micro"
+      AllocatedStorage: "20"
+      MasterUsername: "admin"
+      MasterUserPassword: "password"
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref PrivateSecurityGroup
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: "Subnet group for Crumb Commander MySQL DB"
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  CrumbCommanderFrontEndInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: "t2.medium"
+      ImageId: "ami-06f8dce63a6b60467"
+      KeyName: "vockey"
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: "true"
+          DeleteOnTermination: "true"
+          DeviceIndex: "0"
+          GroupSet:
+            - !Ref PublicSecurityGroup
+          SubnetId: !Ref PublicSubnet1
+
+      Tags:
+        - Key: Name
+          Value: "frontend"
+
+  CrumbCommanderBackendInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: "t2.medium"
+      ImageId: "ami-06f8dce63a6b60467"
+      KeyName: "vockey"
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: "true"
+          DeleteOnTermination: "true"
+          DeviceIndex: "0"
+          GroupSet:
+            - !Ref PublicSecurityGroup
+          SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: "backend"
+
+  PublicSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for public instances"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: "0.0.0.0/0"
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "0.0.0.0/0"
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: "0.0.0.0/0"
+
+  PrivateSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for private instances"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref PublicSecurityGroup
+
+  CrumbCommanderSecretManager:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: "CrumbCommanderSecrets"
+      Description: "Secret for Crumb Commander Application"
+      SecretString: '{"DBUSERNAME": "admin", "PASSWORD": "password", "PORT": "3306", "DATABASE": "crumb_commander_db", "HOST": { "Fn::GetAtt": ["MySQLDB", "Endpoint.Address"] }, "SECRET_KEY": "thisisasecretkeyforcloudproject@2024"}'
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: lambda_function.lambda_handler
+      Role: arn:aws:iam::514099915046:role/LabRole
+      FunctionName: "lambda_function"
+      Code:
+        S3Bucket: "crumbcommander-bucket"
+        S3Key: "lambda_function.zip"
+      Runtime: python3.8
+
+  CPUAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: "CPUAlarmTopic"
+      Subscription:
+        - Endpoint: "tsp57081@gmail.com"
+          Protocol: "email"
+
+  CPUUtilizationAlarmFrontend:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Alarm for CPU Utilization exceeding 50% - Frontend"
+      Namespace: "AWS/EC2"
+      MetricName: "CPUUtilization"
+      Dimensions:
+        - Name: "InstanceId"
+          Value: !Ref CrumbCommanderFrontEndInstance
+      Statistic: "Average"
+      Period: "10"
+      EvaluationPeriods: "1"
+      Threshold: "50"
+      ComparisonOperator: "GreaterThanThreshold"
+      AlarmActions:
+        - !Ref CPUAlarmTopic
+
+  CPUUtilizationAlarmBackend:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Alarm for CPU Utilization exceeding 50% - Backend"
+      Namespace: "AWS/EC2"
+      MetricName: "CPUUtilization"
+      Dimensions:
+        - Name: "InstanceId"
+          Value: !Ref CrumbCommanderBackendInstance
+      Statistic: "Average"
+      Period: "300" # 5 minutes
+      EvaluationPeriods: "1"
+      Threshold: "50"
+      ComparisonOperator: "GreaterThanThreshold"
+      AlarmActions:
+        - !Ref CPUAlarmTopic
+
+  LaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: "ami-06f8dce63a6b60467"
+      InstanceType: "t2.medium"
+      KeyName: "vockey"
+      SecurityGroups:
+        - !Ref PublicSecurityGroup
+
+  AutoScalingGroupFrontend:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      LaunchConfigurationName: !Ref LaunchConfiguration
+      MinSize: "1"
+      MaxSize: "5"
+      DesiredCapacity: "1"
+      TargetGroupARNs: []
+      Tags:
+        - Key: Name
+          Value: "frontend"
+          PropagateAtLaunch: true
+
+  AutoScalingGroupBackend:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      LaunchConfigurationName: !Ref LaunchConfiguration
+      MinSize: "1"
+      MaxSize: "5"
+      DesiredCapacity: "1"
+      TargetGroupARNs: []
+      Tags:
+        - Key: Name
+          Value: "backend"
+          PropagateAtLaunch: true
+
+  ScaleUpPolicyFrontend:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroupFrontend
+      PolicyType: "SimpleScaling"
+      AdjustmentType: "ChangeInCapacity"
+      ScalingAdjustment: "1"
+      Cooldown: "300"
+
+  ScaleDownPolicyFrontend:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroupFrontend
+      PolicyType: "SimpleScaling"
+      AdjustmentType: "ChangeInCapacity"
+      ScalingAdjustment: "-1"
+      Cooldown: "300"
+
+  ScaleUpPolicyBackend:
+    Type: AWS::AutoScaling::ScalingPolicy
